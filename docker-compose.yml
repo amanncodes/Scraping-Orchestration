@@ -1,0 +1,33 @@
+version: "3.9"
+services:
+  api:
+    build: .
+    command: python manage.py runserver 0.0.0.0:8000
+    ports: ["8000:8000"]
+    env_file: .env
+    depends_on: [postgres, mongo, redis]
+    volumes: [".:/app"]
+
+  worker:
+    build: .
+    command: celery -A sop worker -Q sop.scrape,sop.webhook -c 4 --loglevel=info
+    env_file: .env
+    depends_on: [postgres, mongo, redis]
+    volumes: [".:/app"]
+
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: sop
+      POSTGRES_USER: sop
+      POSTGRES_PASSWORD: sop
+    ports: ["5432:5432"]
+
+  mongo:
+    image: mongo:7
+    ports: ["27017:27017"]
+
+  # LOCAL DEV ONLY — production points to existing shared Redis
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
