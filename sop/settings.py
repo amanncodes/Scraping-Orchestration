@@ -27,30 +27,23 @@ DATABASES = {
     "default": env.db("DATABASE_URL")
 }
 
-# Redis
-REDIS_URL = env("REDIS_URL", default="redis://localhost:6379/0")
-
-# Celery — connects to EXISTING shared Redis broker
-CELERY_BROKER_URL = REDIS_URL
+REDIS_URL           = env("REDIS_URL", default="redis://redis:6379/0")
+CELERY_BROKER_URL   = REDIS_URL
 CELERY_RESULT_BACKEND = REDIS_URL
-CELERY_TASK_QUEUES_DEFAULT = "sop.scrape"
 
-# MongoDB
-MONGO_URL = env("MONGO_URL", default="mongodb://localhost:27017")
-MONGO_DB = env("MONGO_DB", default="sop")
+MONGO_URL = env("MONGO_URL", default="mongodb://mongo:27017")
+MONGO_DB  = env("MONGO_DB",  default="sop")
 
-# External services
-EXISTING_BACKEND_URL = env("EXISTING_BACKEND_URL")
+SCRAPER_URL     = env("SCRAPER_URL")
 SOP_WEBHOOK_URL = env("SOP_WEBHOOK_URL")
 
-# Cache TTLs
 CACHE_TTL = {
     "instagram": env.int("CACHE_TTL_INSTAGRAM", default=86400),
 }
 
 REST_FRAMEWORK = {
     "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
-    "DEFAULT_PARSER_CLASSES": ["rest_framework.parsers.JSONParser"],
+    "DEFAULT_PARSER_CLASSES":   ["rest_framework.parsers.JSONParser"],
 }
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"

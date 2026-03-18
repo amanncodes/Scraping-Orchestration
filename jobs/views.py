@@ -3,54 +3,55 @@ from django.conf import settings
 from django.utils import timezone
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework import status
+from rest_framework import status as http_status
 
-from .models import Job, JobLayer, JobStatus
-from .serializers import JobSubmitSerializer, JobStatusSerializer
-from services.instagram import validate_instagram_url
-from services.cache import check_cache, write_cache
-from services.payload_store import get_payload
-from services.event_logger import log_event, log_error
+from .models import Job, JobStatus
+from .serializers import SubmitSerializer, StatusSerializer
+from services.instagram import extract_post_id
+from services.cache import check as cache_check, write as cache_write
+from services.payload_store import fetch as payload_fetch
 
 
 class JobSubmitView(APIView):
 
     def post(self, request):
-        serializer = JobSubmitSerializer(data=request.data)
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        ser = SubmitSerializer(data=request.data)
+        if not ser.is_valid():
+            return Response(ser.errors, status=http_status.HTTP_400_BAD_REQUEST)
 
-        url      = serializer.validated_data["url"]
-        platform = serializer.validated_data["platform"]  # "instagram" only for now
+        url      = ser.validated_data["url"]
+        platform = ser.validated_data["platform"]
 
-        # ── Step 1: Extract post_id ───────────────────────────────
-        post_id, err = validate_instagram_url(url)
-        if err:
-            return Response({"error": err}, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
+        # ── 1. Extract post ID via regex ──────────────────────────
+        post_id = extract_post_id(url)
+        if not post_id:
+            return Response(
+                {"error": (
+                    "Cannot extract a valid Instagram post ID from this URL. "
+                    "Supported: /p/{id}/, /reel/{id}/, /tv/{id}/"
+                )},
+                status=http_status.HTTP_422_UNPROCESSABLE_ENTITY
+            )
 
-        log_event("job_received", job_id="pending", platform=platform, post_id=post_id)
-
-        # ── Step 2: Redis cache check (fast path) ─────────────────
-        cached = check_cache(post_id, platform)
+        # ── 2. Redis cache check ──────────────────────────────────
+        cached = cache_check(post_id)
         if cached:
-            # Audit job
             job = Job.objects.create(
                 post_id=post_id, url=url, platform=platform,
                 status=JobStatus.CACHED, source="cached",
                 storage_ref=cached["storage_ref"],
                 started_at=timezone.now(), completed_at=timezone.now(),
             )
-            payload = get_payload(cached["storage_ref"])
-            log_event("cache_hit", job_id=job.id, platform=platform, post_id=post_id)
+            payload_doc = payload_fetch(cached["storage_ref"])
             return Response({
                 "job_id":  str(job.id),
                 "status":  "cached",
-                "source":  "cached",
-                "message": "Data already available. Returning cached result.",
-                "payload": payload["data"] if payload else None,
-            }, status=status.HTTP_200_OK)
+                "source":  "redis_cache",
+                "message": "Already scraped. Returning cached payload.",
+                "payload": payload_doc["data"] if payload_doc else None,
+            }, status=http_status.HTTP_200_OK)
 
-        # ── Step 3: Postgres dedup check ──────────────────────────
+        # ── 3. Postgres dedup check ───────────────────────────────
         existing = (
             Job.objects
             .filter(post_id=post_id, platform=platform)
@@ -61,25 +62,23 @@ class JobSubmitView(APIView):
 
         if existing:
             if existing.status == JobStatus.PAYLOAD:
-                payload = get_payload(existing.storage_ref)
-                log_event("db_cache_hit", job_id=existing.id, platform=platform, post_id=post_id)
+                payload_doc = payload_fetch(existing.storage_ref)
                 return Response({
                     "job_id":  str(existing.id),
                     "status":  "cached",
                     "source":  "db_cache",
-                    "message": "Data already available. Returning cached result.",
-                    "payload": payload["data"] if payload else None,
-                }, status=status.HTTP_200_OK)
+                    "message": "Already scraped. Returning cached payload.",
+                    "payload": payload_doc["data"] if payload_doc else None,
+                }, status=http_status.HTTP_200_OK)
 
             if existing.status in (JobStatus.QUEUED, JobStatus.PROCESSING):
-                log_event("duplicate_in_progress", job_id=existing.id, platform=platform, post_id=post_id)
                 return Response({
                     "job_id":  str(existing.id),
                     "status":  existing.status,
-                    "message": "A scrape for this post is already in progress.",
-                }, status=status.HTTP_202_ACCEPTED)
+                    "message": "Scrape already in progress for this post.",
+                }, status=http_status.HTTP_202_ACCEPTED)
 
-        # ── Step 4: Create new job ────────────────────────────────
+        # ── 4. New job ────────────────────────────────────────────
         job = Job.objects.create(
             post_id=post_id,
             url=url,
@@ -88,60 +87,63 @@ class JobSubmitView(APIView):
             source="live",
         )
 
-        # ── Step 5: Call existing backend ─────────────────────────
+        # ── 5. Relay to office scraper ────────────────────────────
         try:
             with httpx.Client(timeout=10.0) as client:
                 resp = client.post(
-                    f"{settings.EXISTING_BACKEND_URL}/posts/scrape",
+                    f"{settings.SCRAPER_URL}/posts/scrape",
                     json={
                         "post_uri":     url,
                         "callback_url": settings.SOP_WEBHOOK_URL,
+                        "job_id":       str(job.id),
                     }
                 )
                 resp.raise_for_status()
+                job.status = JobStatus.PROCESSING
+                job.started_at = timezone.now()
+                job.save()
+
         except Exception as e:
             job.status = JobStatus.FAILED
-            job.error_summary = f"Could not reach scraping backend: {str(e)}"
+            job.error_summary = f"Could not reach scraper: {str(e)}"
             job.completed_at = timezone.now()
             job.save()
-            log_error("backend_unreachable", job_id=job.id, platform=platform, error=str(e))
             return Response(
-                {"error": "Scraping service unreachable. Please try again."},
-                status=status.HTTP_502_BAD_GATEWAY
+                {"error": f"Scraper unreachable: {str(e)}"},
+                status=http_status.HTTP_502_BAD_GATEWAY
             )
-
-        log_event("job_queued", job_id=job.id, platform=platform, post_id=post_id)
 
         return Response({
             "job_id":  str(job.id),
             "status":  "queued",
-            "message": f"Scrape job queued for instagram post {post_id}.",
-        }, status=status.HTTP_202_ACCEPTED)
+            "message": f"Scrape job relayed to scraper for post {post_id}.",
+        }, status=http_status.HTTP_202_ACCEPTED)
 
 
 class JobStatusView(APIView):
 
     def get(self, request, job_id):
         try:
-            job = Job.objects.prefetch_related("layers").get(id=job_id)
+            job = Job.objects.get(id=job_id)
         except Job.DoesNotExist:
-            return Response({"error": "Job not found."}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {"error": "Job not found."},
+                status=http_status.HTTP_404_NOT_FOUND
+            )
 
-        data = JobStatusSerializer(job).data
+        data = StatusSerializer(job).data
 
-        # Attach payload if ready
         if job.status == JobStatus.PAYLOAD and job.storage_ref:
-            payload_doc = get_payload(job.storage_ref)
+            payload_doc = payload_fetch(job.storage_ref)
             data["payload"] = payload_doc["data"] if payload_doc else None
 
-        # Human-readable message per status
         messages = {
-            JobStatus.QUEUED:     "Job is queued and will begin shortly.",
-            JobStatus.PROCESSING: f"Scraping in progress via {job.current_layer or 'scraper'}.",
-            JobStatus.PAYLOAD:    "Scrape complete. Payload is ready.",
-            JobStatus.FAILED:     "Scrape failed. " + (job.error_summary or ""),
-            JobStatus.CACHED:     "Data returned from cache.",
+            JobStatus.QUEUED:     "Job queued. Scraper is being contacted.",
+            JobStatus.PROCESSING: "Scraper is running.",
+            JobStatus.PAYLOAD:    "Scrape complete. Payload ready.",
+            JobStatus.FAILED:     f"Failed. {job.error_summary or ''}",
+            JobStatus.CACHED:     "Returned from cache.",
         }
         data["message"] = messages.get(job.status, "")
 
-        return Response(data, status=status.HTTP_200_OK)
+        return Response(data)

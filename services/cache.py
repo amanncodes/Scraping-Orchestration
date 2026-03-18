@@ -1,36 +1,34 @@
 import json
-import redis
+import redis as redis_lib
 from django.conf import settings
 
 _client = None
 
-def get_redis():
+
+def _get_client():
     global _client
     if _client is None:
-        _client = redis.from_url(settings.REDIS_URL, decode_responses=True)
+        _client = redis_lib.from_url(settings.REDIS_URL, decode_responses=True)
     return _client
 
 
-def cache_key(post_id: str, platform: str = "instagram") -> str:
-    return f"cache:{platform}:{post_id}"
+def _key(post_id: str) -> str:
+    return f"cache:instagram:{post_id}"
 
 
-def check_cache(post_id: str, platform: str = "instagram") -> dict | None:
-    r = get_redis()
-    raw = r.get(cache_key(post_id, platform))
-    if not raw:
-        return None
-    return json.loads(raw)
+def check(post_id: str) -> dict | None:
+    raw = _get_client().get(_key(post_id))
+    return json.loads(raw) if raw else None
 
 
-def write_cache(post_id: str, storage_ref: str, coverage_ratio: float | None,
-                platform: str = "instagram"):
-    r = get_redis()
-    ttl = settings.CACHE_TTL.get(platform, 86400)
-    data = {"storage_ref": storage_ref, "coverage_ratio": coverage_ratio}
-    r.setex(cache_key(post_id, platform), ttl, json.dumps(data))
+def write(post_id: str, storage_ref: str, coverage: float | None = None):
+    ttl = settings.CACHE_TTL.get("instagram", 86400)
+    _get_client().setex(
+        _key(post_id),
+        ttl,
+        json.dumps({"storage_ref": storage_ref, "coverage": coverage})
+    )
 
 
-def invalidate_cache(post_id: str, platform: str = "instagram"):
-    r = get_redis()
-    r.delete(cache_key(post_id, platform))
+def bust(post_id: str):
+    _get_client().delete(_key(post_id))
