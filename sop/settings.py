@@ -27,8 +27,8 @@ DATABASES = {
     "default": env.db("DATABASE_URL")
 }
 
-REDIS_URL           = env("REDIS_URL", default="redis://redis:6379/0")
-CELERY_BROKER_URL   = REDIS_URL
+REDIS_URL             = env("REDIS_URL", default="redis://redis:6379/0")
+CELERY_BROKER_URL     = REDIS_URL
 CELERY_RESULT_BACKEND = REDIS_URL
 
 MONGO_URL = env("MONGO_URL", default="mongodb://mongo:27017")
@@ -40,6 +40,13 @@ SOP_WEBHOOK_URL = env("SOP_WEBHOOK_URL")
 CACHE_TTL = {
     "instagram": env.int("CACHE_TTL_INSTAGRAM", default=86400),
 }
+
+# ── AWS SQS ────────────────────────────────────────────────────────────────
+AWS_ACCESS_KEY_ID     = env("AWS_ACCESS_KEY_ID")
+AWS_SECRET_ACCESS_KEY = env("AWS_SECRET_ACCESS_KEY")
+AWS_REGION            = env("AWS_REGION", default="ap-south-1")
+SQS_QUEUE_URL         = env("SQS_QUEUE_URL")
+SQS_FALLBACK_TIMEOUT  = env.int("SQS_FALLBACK_TIMEOUT", default=90)
 
 REST_FRAMEWORK = {
     "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
