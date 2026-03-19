@@ -501,7 +501,7 @@ GET /api/v1/jobs/36210b6a-5709-4415-a938-361649195406
 
 Called by Lambda or login-bot-1 when scraping completes. This endpoint is also used to manually simulate scraper callbacks during testing.
 
-**Request — Shape A (login-bot-1 and Lambda format):**
+**Request:**
 ```json
 {
     "job_id": "36210b6a-5709-4415-a938-361649195406",
@@ -530,7 +530,7 @@ Called by Lambda or login-bot-1 when scraping completes. This endpoint is also u
 }
 ```
 
-**Request — Shape B (array format):**
+**Request :**
 ```json
 [
     {
@@ -541,7 +541,7 @@ Called by Lambda or login-bot-1 when scraping completes. This endpoint is also u
 ]
 ```
 
-**Request — Shape C (direct data format, mock scraper):**
+**Request — Shape B (direct data format, mock scraper):**
 ```json
 {
     "job_id": "36210b6a-5709-4415-a938-361649195406",
@@ -594,7 +594,7 @@ Called by Lambda or login-bot-1 when scraping completes. This endpoint is also u
 
 **Source detection logic in the webhook:**
 
-The webhook inspects the payload shape to correct the source field if needed. The presence of a "retry_loop" key identifies a login-bot-1 callback (Shape A). The presence of a "data" key without "retry_loop" identifies a Lambda or mock callback (Shape C). If the job source is still "sqs" but the callback came from login-bot-1, the source is updated to "login_bot_fallback" to accurately reflect which scraper delivered the result.
+The webhook inspects the payload shape to correct the source field if needed. The presence of a "retry_loop" key identifies a login-bot-1 callback. The presence of a "data" key without "retry_loop" identifies a Lambda or mock callback (Shape B). If the job source is still "sqs" but the callback came from login-bot-1, the source is updated to "login_bot_fallback" to accurately reflect which scraper delivered the result.
 
 ---
 
