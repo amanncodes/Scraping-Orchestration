@@ -20,7 +20,7 @@ class Job(models.Model):
                         choices=JobStatus.choices,
                         default=JobStatus.QUEUED
                     )
-    source        = models.CharField(max_length=16, default="live")
+    source        = models.CharField(max_length=32, default="live")
     storage_ref   = models.CharField(max_length=64, null=True, blank=True)
     error_summary = models.TextField(null=True, blank=True)
     created_at    = models.DateTimeField(auto_now_add=True)
