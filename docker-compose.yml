@@ -35,7 +35,7 @@ services:
       POSTGRES_USER: sop
       POSTGRES_PASSWORD: sop
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
@@ -43,7 +43,7 @@ services:
     image: redis:7-alpine
     restart: always
     ports:
-      - "6379:6379"
+      - "6380:6379"
     volumes:
       - redis_data:/data
 
@@ -51,9 +51,17 @@ services:
     image: mongo:7
     restart: always
     ports:
-      - "27017:27017"
+      - "27018:27017"
     volumes:
       - mongo_data:/data/db
+  
+  mock-scraper:
+    build: ./mock_scraper
+    ports:
+      - "9000:9000"
+    depends_on:
+      - api
+      
 
 volumes:
   postgres_data:
