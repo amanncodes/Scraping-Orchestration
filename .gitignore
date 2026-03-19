@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env.local
+
+# Django
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+staticfiles/
+mediafiles/
+
+# Migrations — commit these, but ignore pyc inside them
+jobs/migrations/__pycache__/
+webhook/migrations/__pycache__/
+
+# Environment variables — NEVER commit real credentials
+.env
+# Keep the example file
+!.env.example
+
+# Docker
+docker-compose.override.yml
+
+# Redis dump
+dump.rdb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Coverage / testing
+.coverage
+htmlcov/
+.pytest_cache/
