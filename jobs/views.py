@@ -1,4 +1,6 @@
+import json
 import httpx
+import boto3
 from django.conf import settings
 from django.utils import timezone
 from rest_framework.views import APIView
@@ -10,6 +12,65 @@ from .serializers import SubmitSerializer, StatusSerializer
 from services.instagram import extract_post_id
 from services.cache import check as cache_check, write as cache_write
 from services.payload_store import fetch as payload_fetch
+
+
+def _push_to_sqs(job_id: str, post_url: str, callback_url: str) -> bool:
+    """
+    Push a scrape job to AWS SQS.
+    Lambda picks up the message, scrapes using GraphQL API,
+    and POSTs results to callback_url.
+    Returns True if message was sent successfully, False otherwise.
+    """
+    try:
+        sqs = boto3.client(
+            "sqs",
+            region_name=settings.AWS_REGION,
+            aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+        )
+        message = {
+            "job_id":       job_id,
+            "post_url":     post_url,
+            "callback_url": callback_url,
+        }
+        sqs.send_message(
+            QueueUrl=settings.SQS_QUEUE_URL,
+            MessageBody=json.dumps(message),
+        )
+        return True
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(
+            f"SQS push failed for job {job_id}: {e}"
+        )
+        return False
+
+
+def _trigger_login_bot(job_id: str, post_url: str, callback_url: str, platform: str) -> bool:
+    """
+    Trigger login-bot-1 as fallback scraper.
+    Uses cookie-based DOM scraping via office PC.
+    Returns True if login-bot accepted the job, False otherwise.
+    """
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            resp = client.post(
+                f"{settings.SCRAPER_URL}/webhook/trigger-job/",
+                json={
+                    "job_id":       job_id,
+                    "platform":     platform,
+                    "post_url":     post_url,
+                    "callback_url": callback_url,
+                }
+            )
+            resp.raise_for_status()
+            return True
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(
+            f"login-bot-1 fallback failed for job {job_id}: {e}"
+        )
+        return False
 
 
 class JobSubmitView(APIView):
@@ -78,7 +139,7 @@ class JobSubmitView(APIView):
                     "message": "Scrape already in progress for this post.",
                 }, status=http_status.HTTP_202_ACCEPTED)
 
-        # ── 4. New job ────────────────────────────────────────────
+        # ── 4. Create new job ─────────────────────────────────────
         job = Job.objects.create(
             post_id=post_id,
             url=url,
@@ -87,37 +148,73 @@ class JobSubmitView(APIView):
             source="live",
         )
 
-        # ── 5. Relay to office scraper ────────────────────────────
-        try:
-            with httpx.Client(timeout=10.0) as client:
-                resp = client.post(
-                    f"{settings.SCRAPER_URL}/posts/scrape",
-                    json={
-                        "post_uri":     url,
-                        "callback_url": settings.SOP_WEBHOOK_URL,
-                        "job_id":       str(job.id),
-                    }
-                )
-                resp.raise_for_status()
-                job.status = JobStatus.PROCESSING
-                job.started_at = timezone.now()
-                job.save()
+        # ── 5. Try SQS (Lambda) first ─────────────────────────────
+        sqs_ok = _push_to_sqs(
+            job_id=str(job.id),
+            post_url=url,
+            callback_url=settings.SOP_WEBHOOK_URL,
+        )
 
-        except Exception as e:
-            job.status = JobStatus.FAILED
-            job.error_summary = f"Could not reach scraper: {str(e)}"
-            job.completed_at = timezone.now()
+        if sqs_ok:
+            # SQS accepted — update job and schedule Celery fallback timer.
+            # If Lambda doesn't callback within SQS_FALLBACK_TIMEOUT seconds,
+            # Celery fires login-bot-1 automatically as fallback.
+            job.status     = JobStatus.PROCESSING
+            job.started_at = timezone.now()
+            job.source     = "sqs"
             job.save()
-            return Response(
-                {"error": f"Scraper unreachable: {str(e)}"},
-                status=http_status.HTTP_502_BAD_GATEWAY
+
+            from jobs.tasks import fallback_to_login_bot
+            fallback_to_login_bot.apply_async(
+                args=[str(job.id), url, platform],
+                countdown=settings.SQS_FALLBACK_TIMEOUT,
             )
 
-        return Response({
-            "job_id":  str(job.id),
-            "status":  "queued",
-            "message": f"Scrape job relayed to scraper for post {post_id}.",
-        }, status=http_status.HTTP_202_ACCEPTED)
+            return Response({
+                "job_id":  str(job.id),
+                "status":  "queued",
+                "source":  "sqs",
+                "message": (
+                    f"Scrape job sent to Lambda via SQS for post {post_id}. "
+                    f"Fallback to login-bot-1 in {settings.SQS_FALLBACK_TIMEOUT}s "
+                    f"if no response."
+                ),
+            }, status=http_status.HTTP_202_ACCEPTED)
+
+        # ── 6. SQS failed — fall back to login-bot-1 immediately ──
+        login_bot_ok = _trigger_login_bot(
+            job_id=str(job.id),
+            post_url=url,
+            callback_url=settings.SOP_WEBHOOK_URL,
+            platform=platform,
+        )
+
+        if login_bot_ok:
+            job.status     = JobStatus.PROCESSING
+            job.started_at = timezone.now()
+            job.source     = "login_bot_immediate"
+            job.save()
+
+            return Response({
+                "job_id":  str(job.id),
+                "status":  "queued",
+                "source":  "login_bot",
+                "message": (
+                    f"SQS unavailable. Scrape job relayed directly to login-bot-1 "
+                    f"for post {post_id}."
+                ),
+            }, status=http_status.HTTP_202_ACCEPTED)
+
+        # ── 7. Both paths failed ──────────────────────────────────
+        job.status        = JobStatus.FAILED
+        job.error_summary = "Both SQS and login-bot-1 are unreachable."
+        job.completed_at  = timezone.now()
+        job.save()
+
+        return Response(
+            {"error": "All scrapers unreachable. Job marked as failed."},
+            status=http_status.HTTP_502_BAD_GATEWAY
+        )
 
 
 class JobStatusView(APIView):
